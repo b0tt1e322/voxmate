@@ -256,7 +256,7 @@ function closeEditProfile() {
 }
 
 function renderEditProfile() {
-  const avatars = ["\u{1F60E}","\u{1F929}","\u{1F63A}","\u{1F98A}","\u{1F436}","\u{1F43C}","\u{1F981}","\u{1F42F}","\u{1F430}","\u{1F338}","\u{1F319}",""\u2B50","\u{1F525}","\u{1F49C}",""\u26A1","\u{1F30A}"];
+  const avatars = ["\u{1F60E}","\u{1F929}","\u{1F63A}","\u{1F98A}","\u{1F436}","\u{1F43C}","\u{1F981}","\u{1F42F}","\u{1F430}","\u{1F338}","\u{1F319}","\u2B50","\u{1F525}","\u{1F49C}","\u26A1","\u{1F30A}"];
   return '<div class="modal-overlay" onclick="if(event.target===this)closeEditProfile()">'+
     '<div class="modal-card"><div class="modal-header"><h2>✏️ 修改资料</h2><button class="modal-close" onclick="closeEditProfile()">✕</button></div>'+
     '<div class="modal-body"><div class="edit-avatar-section"><label>选择头像</label>'+
@@ -344,5 +344,7 @@ async function logout() {
   saveState(); render(); showMsg('已退出');
 }
 window.logout = logout;
+
+
 
 
