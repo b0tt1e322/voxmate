@@ -94,3 +94,4 @@ const VOICE_ROOMS = [
   { id:"vr15", name:"自由开黑 · 综合", icon:"🎮", game:"综合", desc:"任何游戏都可，自由组队开黑语音", max:10 },
   { id:"vr16", name:"闲聊 · 摸鱼交友", icon:"☕", game:"综合", desc:"不打游戏时聊天吹水交朋友", max:10 }
 ];
+

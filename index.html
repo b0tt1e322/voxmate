@@ -4,14 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>VOXMate · 语音开黑伙伴</title>
-  <meta name="description" content="VOXMate - 真人语音开黑平台，支持异环、三角洲、LOL、CS2等热门游戏。找真人搭子，语音开黑不孤单。">
+  <meta name="description" content="VOXMate - 真人语音开黑平台">
   <meta name="theme-color" content="#0a0a14">
-  <!-- PeerJS for WebRTC voice -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
-  <!-- Nav -->
   <nav>
     <div class="nav-inner">
       <a href="#home" class="nav-logo">VOXMate</a>
@@ -20,19 +19,15 @@
         <a href="#games" class="nav-link" data-page="games">游戏</a>
         <a href="#buddy" class="nav-link" data-page="buddy">搭子</a>
         <a href="#chat" class="nav-link" data-page="chat">消息</a>
+        <a href="#voice" class="nav-link" data-page="voice">语音</a>
         <a href="#profile" class="nav-link" data-page="profile">我的</a>
       </div>
-      <!-- Mobile voice room indicator -->
       <button class="nav-vc-btn" id="navVcBtn" style="display:none" onclick="location='#voice'">🔊</button>
     </div>
   </nav>
-
-  <!-- Main app -->
   <div id="app"></div>
-
-  <!-- Scripts -->
   <script src="js/data.js"></script>
-  <script src="js/app.js"></script>
   <script src="js/voice.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>

@@ -1,5 +1,9 @@
-﻿// ===== State =====
-let state = { page:'home', user:null, chatWith:null, msgs:{}, myGames:[], voiceJoined:null, voiceUsers:{}, buddyFilter:'', _loginTab:'login', _callStart:null, _callMicOff:false, users:[] };
+﻿// ===== 后端配置 =====
+const API_URL = "https://voxmate-server.onrender.com";
+let socket = null;
+
+// ===== State =====
+let state = { page:'home', user:null, chatWith:null, msgs:{}, myGames:[], voiceJoined:null, voiceUsers:{}, buddyFilter:'', _loginTab:'login', _editProfile:false, _editAvatar:null, _editNickname:'', users:[] };
 
 function loadState() {
   try { const s = localStorage.getItem('vm_state'); if (s) Object.assign(state, JSON.parse(s)); } catch(e) {}
@@ -34,7 +38,7 @@ window.render = render;
 function updateNav() {
   $$('.nav-link').forEach(el => el.classList.toggle('active', el.dataset.page === state.page));
   const btn = $('#navVcBtn');
-  if (state.voiceJoined) { btn.style.display = 'flex'; btn.innerHTML = '🔊 '+(state.voiceUsers[state.voiceJoined]?.length||0); }
+  if (state.voiceJoined) { btn.style.display = 'flex'; btn.innerHTML = "\u{1F50A} "+(state.voiceUsers[state.voiceJoined]?.length||0); }
   else btn.style.display = 'none';
 }
 
@@ -47,28 +51,57 @@ function showMsg(msg, dur=2500) {
 }
 window.showMsg = showMsg; window.showToast = showMsg;
 
-function getAvatar(id) {
-  const u = getAllUsers().find(x => x.id === id);
-  return u ? u.avatar : '😎';
+// ===== API 调用 =====
+async function api(path, data) {
+  try {
+    const opt = { headers: { 'Content-Type': 'application/json' } };
+    if (data) { opt.method = 'POST'; opt.body = JSON.stringify(data); }
+    const resp = await fetch(API_URL + path, opt);
+    return await resp.json();
+  } catch(e) { showMsg('网络错误：' + e.message); return null; }
 }
 
-function getAllUsers() {
-  const us = [...REAL_PLAYERS];
-  if (state.user && !us.find(u => u.id === state.user.id)) {
-    us.unshift({ ...state.user, online: true, vc: true });
-  }
-  return us;
+// ===== Socket.IO 连接 =====
+function connectSocket(user) {
+  if (socket) socket.disconnect();
+  // Socket.IO with REST polling fallback - no CDN needed, we use io() from the script
+  if (typeof io === 'undefined') { console.log('Socket.IO not loaded'); return; }
+  socket = io(API_URL, { transports: ['websocket', 'polling'] });
+  socket.on('connect', () => {
+    console.log('Socket connected');
+    socket.emit('user:online', { id: user.id, nickname: user.nickname, avatar: user.avatar });
+  });
+  socket.on('users:online', (users) => { state._onlineUsers = users; });
+  socket.on('room:members', (members) => { state.voiceUsers[state.voiceJoined] = members; if (state.page === 'voice') render(); });
+  socket.on('chat:new_message', (msg) => {
+    const roomId = state.voiceJoined || 'lobby';
+    if (!state.msgs[roomId]) state.msgs[roomId] = [];
+    state.msgs[roomId].push(msg);
+    if (state.page === 'voice') setTimeout(scrollChat, 50);
+  });
+  socket.on('disconnect', () => console.log('Socket disconnected'));
 }
+window.connectSocket = connectSocket;
+
+function getAllUsers() {
+  return state._onlineUsers || [];
+}
+
+// ===== 获取头像 =====
+function getAvatar(id) {
+  const u = getAllUsers().find(x => x.id === id);
+  return u ? u.avatar : "\u{1F60E}";
+}
+
 // ===== HOME =====
 function renderHome() {
   const hot = [...GAMES].sort((a,b)=>b.hot-a.hot).slice(0,10);
-  const users = getAllUsers().filter(u => u.online);
-  const posts = getAllPosts();
+  const users = getAllUsers();
   return `
     <section class="hero">
       <div class="hero-tag">🎤 真人语音 · 秒连开黑</div>
       <h1 class="hero-title">找到你的<span class="gradient-text">游戏搭子</span></h1>
-      <p class="hero-sub">${state.user ? '欢迎回来，'+state.user.name+'！' : '异环 · 三角洲 · LOL · CS2 · 语音组队平台'}</p>
+      <p class="hero-sub">${state.user ? '欢迎回来，'+state.user.nickname+'！' : '异环 · 三角洲 · LOL · CS2 · 语音组队平台'}</p>
       <div class="hero-actions">
         <a class="btn btn-primary" href="#voice">🎤 语音大厅</a>
         <a class="btn btn-outline" href="#buddy">🤝 找搭子</a>
@@ -89,231 +122,212 @@ function renderHome() {
     </section>
     <section class="section">
       <div class="section-header"><h2>🌟 推荐语音频道</h2><a href="#voice" class="more-link">全部频道 →</a></div>
-      <div class="voice-room-scroll">
-        ${VOICE_ROOMS.slice(0,5).map(r => `<div class="vr-card-sm" onclick="location='#voice'"><div class="vr-icon">${r.icon}</div><div class="vr-info"><div class="vr-name">${r.name}</div><div class="vr-count">${r.max}人房</div></div></div>`).join('')}
-      </div>
+      ${renderHomeRooms()}
     </section>
     <section class="section">
-      <div class="section-header"><h2>🟢 在线搭子 <span style="font-size:13px;color:#888;font-weight:400">${users.length}人</span></h2><a href="#buddy" class="more-link">全部 →</a></div>
-      <div class="buddy-scroll">
-        ${users.slice(0,10).map(u => `<div class="buddy-card-sm" onclick="startChat(${u.id},'${u.name}')"><div class="buddy-avatar"><span>${u.avatar}</span><span class="online-dot"></span></div><div class="buddy-name">${u.name}</div><div class="buddy-game">${u.game}</div></div>`).join('')}
+      <div class="section-header"><h2>🟢 在线搭子 <span class="tag tag-s">${users.length}人在线</span></h2><a href="#buddy" class="more-link">全部 →</a></div>
+      <div class="user-scroll">
+        ${users.slice(0,10).map(u => renderUserCard(u)).join('')}
+        ${!users.length ? '<p class="empty-state">暂无在线搭子</p>' : ''}
       </div>
-    </section>
-    <section class="section">
-      <div class="section-header"><h2>💬 最新动态</h2></div>
-      <div class="post-list">
-        ${posts.length ? posts.map(p => `<div class="post-card"><div class="post-head"><span class="post-avatar">${p.avatar}</span><div class="post-user"><span class="post-name">${p.author}</span><span class="post-time">${p.time}</span></div><span class="post-game-tag">${p.game}</span></div><p class="post-content">${p.content}</p><div class="post-tags">${(p.tags||[]).map(t=>`<span class="tag">${t}</span>`).join('')}</div><div class="post-foot"><span>💬 ${p.comments||0}</span><span>👍 ${p.likes||0}</span></div></div>`).join('') : '<div class="empty-state">暂无动态 · 去 <a href="#buddy" style="color:#7c5cfc">找搭子</a> 一起玩吧！</div>'}
-      </div>
-    </section>
-  `;
+    </section>`;
 }
 
-function getAllPosts() {
-  try { return JSON.parse(localStorage.getItem('vm_posts')||'[]'); } catch(e) { return []; }
+function renderHomeRooms() {
+  return '<div class="voice-room-scroll">'+VOICE_ROOMS.slice(0,5).map(r => '<div class="vr-card-sm" onclick="location=\'#voice\'"><div class="vr-icon">'+r.icon+'</div><div class="vr-info"><div class="vr-name">'+r.name+'</div><div class="vr-count">'+r.max+'人房</div></div></div>').join('')+'</div>';
 }
-function savePost(post) {
-  const p = getAllPosts(); p.unshift(post); localStorage.setItem('vm_posts', JSON.stringify(p));
+
+function renderUserCard(u) {
+  return '<div class="user-card-sm" onclick="location=\'#buddy\'"><span class="user-sm-avatar">'+(u.avatar||"\u{1F60E}")+'</span><div class="user-sm-info"><div class="user-sm-name">'+(u.nickname||'')+'</div><div class="user-sm-game">'+(u.game||'找搭子')+'</div></div></div>';
 }
+
 // ===== GAMES =====
-let gameFilter = { cat:0, plat:'all' };
-
 function renderGames() {
-  let list = [...GAMES];
-  if (gameFilter.plat !== 'all') list = list.filter(g => g.plat === gameFilter.plat);
-  if (gameFilter.cat > 0) {
-    const cat = CATEGORIES[gameFilter.cat];
-    list = list.filter(g => g.cat.includes(cat) || g.tags.includes(cat));
-  }
-  return '<div class="page-header"><h1>🎮 游戏库</h1><p>'+GAMES.length+'款热门游戏 · 语音组队</p></div>'+
-    '<div class="filter-bar"><div class="plat-tabs">'+['all','Steam','WeGame','全平台'].map(p => '<button class="plat-tab '+(gameFilter.plat===p?'active':'')+'" onclick="setPlat(\''+p+'\')">'+(p==='all'?'全部':p)+'</button>').join('')+'</div>'+
-    '<div class="cat-scroll">'+CATEGORIES.map((c,i) => '<span class="cat-tag '+(gameFilter.cat===i?'active':'')+'" onclick="setCat('+i+')">'+c+'</span>').join('')+'</div></div>'+
-    '<div class="game-grid">'+list.map(g => '<div class="game-card" onclick="showGameDetail('+g.id+')"><div class="game-card-icon" style="background:'+g.color+'"><span>'+g.icon+'</span></div><div class="game-card-body"><div class="game-card-header"><span class="game-card-name">'+g.name+'</span><span class="game-card-rating">⭐'+g.rating+'</span></div><div class="game-card-tags">'+g.tags.map(t=>'<span class="tag">'+t+'</span>').join('')+'<span class="tag '+(g.plat==='Steam'?'tag-s':'tag-w')+'">'+g.plat+'</span></div><div class="game-card-foot"><span>'+g.cat+'</span><span>🟢 '+g.players.toLocaleString()+'人在玩</span></div></div></div>').join('')+'</div>'+
-    '<div class="list-end">共 '+list.length+' 款游戏</div>';
+  return `<div class="page-header"><h1>🎮 游戏库</h1><p>找到你的游戏，看看谁在玩</p></div>
+    <div class="game-grid">${GAMES.map(g => `<div class="game-card" onclick="showGameDetail(${g.id})"><div class="game-icon" style="background:${g.color}"><span>${g.icon}</span></div><div class="game-name">${g.name}</div><div class="game-players">${(g.players/1000).toFixed(0)}k 玩家</div><div class="game-tags">${g.tags.slice(0,2).map(t => '<span class="tag">'+t+'</span>').join('')}</div></div>`).join('')}</div>`;
 }
-function setPlat(p) { gameFilter.plat = p; render(); }
-function setCat(i) { gameFilter.cat = i; render(); }
-window.setPlat = setPlat; window.setCat = setCat;
 
 function showGameDetail(id) {
-  const g = GAMES.find(x => x.id === id); if (!g) return;
-  const ov = document.createElement('div'); ov.className = 'modal-overlay';
-  ov.innerHTML = '<div class="modal"><span class="modal-close" onclick="this.parentElement.parentElement.remove()">✕</span><div class="modal-icon" style="background:'+g.color+';font-size:60px">'+g.icon+'</div><h2>'+g.name+'</h2>'+(g.en?'<p class="modal-en">'+g.en+'</p>':'')+'<p class="modal-desc">'+g.desc+'</p><div class="modal-stats"><span>🔥 '+g.hot+'</span><span>⭐ '+g.rating+'分</span><span>🟢 '+g.players.toLocaleString()+'人在线</span></div><div class="modal-tags">'+g.tags.map(t=>'<span class="tag">'+t+'</span>').join('')+'<span class="tag '+(g.plat==='Steam'?'tag-s':'tag-w')+'">'+g.plat+'</span></div><div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap"><button class="btn btn-primary" onclick="this.closest(\'.modal-overlay\').remove();location=\'#voice\'">🎤 语音组队</button><button class="btn btn-outline" onclick="this.closest(\'.modal-overlay\').remove();state.buddyFilter=\''+g.name+'\';location=\'#buddy\'">🤝 找搭子</button></div></div>';
-  document.body.appendChild(ov);
+  const g = GAMES.find(x=>x.id===id); if (!g) return;
+  showMsg(g.name + '：' + g.desc + ' ｜ 找搭子去语音大厅 →');
 }
 window.showGameDetail = showGameDetail;
 
 // ===== BUDDY =====
 function renderBuddy() {
-  const filter = state.buddyFilter || '';
-  let users = getAllUsers().filter(u => u.online);
-  const games = [...new Set(users.map(u => u.game))].sort();
-  const filtered = filter ? users.filter(u => u.game === filter) : users;
-  return '<div class="page-header"><h1>🤝 真人搭子</h1><p>🟢 '+users.length+' 人在线 · 全部真人玩家</p></div>'+
-    '<div class="filter-bar"><div class="cat-scroll"><span class="cat-tag '+(!filter?'active':'')+'" onclick="state.buddyFilter=\'\';render()">全部</span>'+
-    games.map(g => '<span class="cat-tag '+(filter===g?'active':'')+'" onclick="state.buddyFilter=\''+g+'\';render()">'+g+'</span>').join('')+'</div></div>'+
-    '<div class="player-grid">'+filtered.map(u => '<div class="player-card"><div class="player-head"><span class="player-avatar">'+u.avatar+'</span><div class="player-info"><span class="player-name">'+u.name+'</span><span class="player-level">'+u.level+'</span></div><span class="player-online"></span></div><div class="player-game-tag">'+u.game+' · '+u.mode+'</div><p class="player-desc">'+u.desc+'</p><div class="player-tags">'+u.tags.map(t => '<span class="tag">'+t+'</span>').join('')+'</div><div class="player-actions"><button class="btn btn-primary btn-sm" onclick="startChat('+u.id+',\''+u.name+'\')">💬 私聊</button><button class="btn btn-outline btn-sm" onclick="callPlayer('+u.id+',\''+u.name+'\')">🎤 语音</button></div></div>').join('')+
-    (!filtered.length ? '<div class="empty-state">暂无在线搭子 · <a href="#voice" style="color:#7c5cfc">去语音大厅</a></div>' : '')+'</div>';
+  const users = getAllUsers().filter(u => !state.user || u.id !== state.user.id);
+  const filtered = state.buddyFilter ? users.filter(u => (u.nickname||'').includes(state.buddyFilter) || (u.game||'').includes(state.buddyFilter)) : users;
+  return `<div class="page-header"><h1>🤝 找搭子</h1><p>在线搭子 · 语音开黑不孤单</p></div>
+    <div class="search-bar"><span class="search-icon">🔍</span><input class="search-input" placeholder="搜索搭子（昵称/游戏）..." value="${state.buddyFilter}" oninput="state.buddyFilter=this.value;render()" /></div>
+    ${filtered.length ? '<div class="user-grid">'+filtered.map(u => `<div class="user-card" onclick="location='#chat'"><div class="user-avatar">${u.avatar||"\u{1F60E}"}</div><div class="user-info"><div class="user-name">${u.nickname||''}</div><div class="user-game">🎮 ${u.game||'找搭子'}</div><div class="user-desc">${u.desc||''}</div></div><div class="user-status ${u.online?'online':'offline'}"></div></div>`).join('')+'</div>' : '<div class="empty-state">🔍 没有找到匹配的搭子<br><small>注册后就有更多搭子啦</small></div>'}`
 }
+
 // ===== CHAT =====
 function renderChat() {
-  const c = state.chatWith;
-  if (!c) {
-    const users = getAllUsers().filter(u => u.online);
-    return '<div class="page-header"><h1>💬 消息</h1></div>'+
-      '<div class="chat-list">'+users.map(u => '<div class="chat-list-item" onclick="startChat('+u.id+',\''+u.name+'\')"><span class="cli-avatar">'+u.avatar+'</span><div class="cli-info"><span class="cli-name">'+u.name+'</span><span class="cli-game">'+u.game+'</span></div><span class="cli-status">🟢</span></div>').join('')+'</div>';
-  }
-  return renderChatView();
+  const roomId = state.voiceJoined || 'lobby';
+  if (!state.msgs[roomId]) state.msgs[roomId] = [];
+  const msgs = state.msgs[roomId];
+  return `<div class="page-header"><h1>💬 语音聊天</h1><p>${state.voiceJoined ? VOICE_ROOMS.find(r=>r.id===state.voiceJoined)?.name||'频道聊天' : '大厅聊天'}</p></div>
+    <div class="chat-box" id="chatBox"><div class="chat-msgs" id="chatMsgs">${msgs.map(m => `<div class="chat-msg"><span class="chat-avatar">${m.avatar||"\u{1F60E}"}</span><div><div class="chat-name">${m.nickname||'匿名'}</div><div class="chat-text">${m.content}</div></div></div>`).join('')||'<div class="empty-state">暂无消息，开始聊天吧！</div>'}</div></div>
+    <div class="chat-input-bar"><input class="chat-input" id="chatInput" placeholder="说点什么..." onkeydown="if(event.key==='Enter')sendChat()" /><button class="btn btn-primary btn-sm" onclick="sendChat()">发送</button></div>`;
 }
 
-function startChat(id, name) { state.chatWith = { id, name }; state.page = 'chat'; render(); }
-window.startChat = startChat;
-function closeChat() { state.chatWith = null; render(); }
-window.closeChat = closeChat;
-function scrollChat() { const el = $('.chat-msgs'); if (el) el.scrollTop = el.scrollHeight; }
+function sendChat() {
+  const input = $('#chatInput');
+  if (!input||!input.value.trim()||!state.user) return;
+  const roomId = state.voiceJoined || 'lobby';
+  const msg = { roomId, fromId: state.user.id, content: input.value.trim(), nickname: state.user.nickname, avatar: state.user.avatar };
+  if (socket) socket.emit('chat:message', msg);
+  input.value = '';
+}
+window.sendChat = sendChat;
 
-function renderChatView() {
-  const c = state.chatWith; if (!c) return '';
-  const msgs = state.msgs[c.id] || [];
-  return '<div class="chat-view"><div class="chat-head"><button class="btn-icon" onclick="closeChat()">‹</button><div class="ch-info"><span class="ch-name">'+c.name+'</span><span class="ch-status">🟢 在线</span></div><button class="btn-icon call-btn-icon" onclick="callPlayer('+c.id+',\''+c.name+'\')">📞</button></div>'+
-    '<div class="chat-msgs">'+msgs.map(m => '<div class="msg '+(m.isSelf?'msg-self':'msg-other')+'">'+
-    (m.type==='voice' ? '<div class="voice-msg" onclick="playVoiceMsg(\''+m.url+'\')"><span class="voice-icon">🎤</span><div class="voice-wave"><span></span><span></span><span></span></div><span class="voice-dur">'+m.duration+'″</span></div>' :
-    m.type==='image' ? '<img class="chat-img" src="'+m.url+'" onclick="window.open(this.src)">' :
-    '<span>'+m.text+'</span>')+'<span class="msg-time">'+m.time+'</span></div>').join('')+'</div>'+
-    '<div class="chat-input-bar"><button class="chat-tool" onclick="voiceMsg()">🎤</button><button class="chat-tool" onclick="sendPhoto()">📷</button><input class="chat-input" id="chatInput" placeholder="说点什么..." onkeydown="if(event.key===\'Enter\')sendText()" /><button class="btn btn-primary btn-sm" onclick="sendText()">发送</button></div></div>';
+function scrollChat() {
+  const box = $('#chatMsgs');
+  if (box) box.scrollTop = box.scrollHeight;
 }
 
-function sendText() {
-  const inp = $('#chatInput');
-  if (!inp||!inp.value.trim()||!state.chatWith) return;
-  addMsg({ text:inp.value.trim(), type:'text', isSelf:true }); inp.value = '';
-  setTimeout(() => { const r = ['来了来了！','开黑吗？开语音','我在语音频道等你','加个好友','走起！🎮','好的组我']; addMsg({ text:r[Math.floor(Math.random()*r.length)], type:'text', isSelf:false }); }, 1500);
-}
-window.sendText = sendText;
-
-function addMsg(msg) {
-  const cid = state.chatWith.id;
-  msg.time = new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
-  if (!state.msgs[cid]) state.msgs[cid] = [];
-  state.msgs[cid].push(msg); saveState();
-  render(); setTimeout(scrollChat, 50);
+// ===== VOICE =====
+function renderVoice() {
+  const joined = state.voiceJoined;
+  const room = VOICE_ROOMS.find(r => r.id === joined);
+  return `<div class="page-header"><h1>🎤 语音大厅</h1><p>${joined ? '已加入：' + (room ? room.name : '') : '选择频道加入语音'}</p></div>
+    ${joined && room ? renderVoiceRoom(room) : renderVoiceList()}`;
 }
 
-// Voice msg
-let mediaRec = null, audioChunks = [];
-function voiceMsg() {
-  if (mediaRec?.state === 'recording') { mediaRec.stop(); return; }
-  navigator.mediaDevices.getUserMedia({ audio:true }).then(s => {
-    audioChunks = []; mediaRec = new MediaRecorder(s);
-    mediaRec.ondataavailable = e => { if (e.data.size>0) audioChunks.push(e.data); };
-    mediaRec.onstop = () => {
-      s.getTracks().forEach(t=>t.stop());
-      if (!audioChunks.length) return;
-      const blob = new Blob(audioChunks, { type:'audio/webm' });
-      const url = URL.createObjectURL(blob);
-      const dur = Math.max(1, Math.min(Math.round(blob.size/16000), 60));
-      addMsg({ type:'voice', url, duration:dur, isSelf:true }); mediaRec = null;
-    };
-    mediaRec.start(); showMsg('🎤 录音中...');
-    setTimeout(() => { if (mediaRec?.state==='recording') mediaRec.stop(); }, 30000);
-  }).catch(() => showMsg('⚠️ 需要麦克风权限'));
+function renderVoiceList() {
+  return `<div class="voice-grid">${VOICE_ROOMS.map(r => {
+    const users = state.voiceUsers[r.id] || [];
+    return `<div class="voice-card ${state.voiceJoined === r.id ? 'joined' : ''}" onclick="joinVoiceRoom('${r.id}')">
+      <div class="vc-card-head"><span class="vc-icon">${r.icon}</span><div class="vc-info"><span class="vc-name">${r.name}</span><span class="vc-game">${r.game}</span></div>
+      <span class="vc-user-count">${users.length}/${r.max}</span></div>
+      <p class="vc-desc">${r.desc}</p>
+      ${users.length ? '<div class="vc-users">' + users.map(u => '<span class="vc-user-tag">' + u.avatar + ' ' + u.nickname + '</span>').join('') + '</div>' : '<div class="vc-empty">🟢 等待搭子加入...</div>'}</div>`;
+  }).join('')}</div>`;
 }
-window.voiceMsg = voiceMsg;
-function playVoiceMsg(url) { new Audio(url).play(); }
-window.playVoiceMsg = playVoiceMsg;
 
-function sendPhoto() {
-  const inp = document.createElement('input'); inp.type='file'; inp.accept='image/*'; inp.style.display='none';
-  inp.onchange = () => {
-    const f = inp.files[0]; if (!f) return;
-    const r = new FileReader();
-    r.onload = e => addMsg({ type:'image', url:e.target.result, isSelf:true });
-    r.readAsDataURL(f);
-  };
-  document.body.appendChild(inp); inp.click(); inp.remove();
+function renderVoiceRoom(room) {
+  const users = state.voiceUsers[room.id] || [];
+  return `<div class="voice-room-active"><div class="vr-top"><span class="vr-icon-big">${room.icon}</span><div><h2>${room.name}</h2><p>${room.desc}</p></div>
+    <button class="btn btn-outline btn-sm" onclick="leaveVoiceRoom()">退出频道</button></div>
+    <div class="vr-users-grid">${users.map(u => `<div class="vr-user-card"><div class="vr-user-avatar">${u.avatar}</div><div class="vr-user-name">${u.nickname}</div>
+    <div class="vr-user-status online">🟢 在线</div></div>`).join('')}
+    ${!users.length ? '<div class="empty-state" style="grid-column:1/-1">等待搭子加入语音频道...</div>' : ''}</div>
+    <div class="chat-box" id="chatBox"><div class="chat-msgs" id="chatMsgs">${(state.msgs[room.id]||[]).map(m => `<div class="chat-msg"><span class="chat-avatar">${m.avatar||"\u{1F60E}"}</span><div><div class="chat-name">${m.nickname||'匿名'}</div><div class="chat-text">${m.content}</div></div></div>`).join('')||'<div class="empty-state">频道消息</div>'}</div></div>
+    <div class="vr-controls"><div class="chat-input-bar"><input class="chat-input" id="chatInput" placeholder="说点什么..." onkeydown="if(event.key==='Enter')sendChat()" /><button class="btn btn-primary btn-sm" onclick="sendChat()">发送</button></div>
+    <button class="vc-btn vc-danger" onclick="leaveVoiceRoom()">📞 离开频道</button></div></div>`;
 }
-window.sendPhoto = sendPhoto;
-// ===== PROFILE / LOGIN =====
+
+
+
+
+window.joinVoiceRoom = joinVoiceRoom;
+
+
+window.leaveVoiceRoom = leaveVoiceRoom;
+
+// ===== PROFILE =====
 function renderProfile() {
   if (!state.user) return renderLogin();
   const u = state.user;
-  const myGames = state.myGames.length ? state.myGames : GAMES.filter(g => (u.tags||[]).includes(g.name));
-  return '<div class="profile"><div class="profile-card"><div class="profile-avatar">'+u.avatar+'</div><div class="profile-info"><h2>'+u.name+'</h2><div class="profile-badges"><span class="tag">🏆 Lv.'+(u.level||1)+'</span><span class="tag">'+(u.game||'待组队')+'</span>'+(u.vc?'<span class="tag tag-vc">🎤 语音</span>':'')+'</div></div><button class="btn btn-outline btn-sm" onclick="editProfile()">✏️</button></div>'+
-    '<div class="profile-stats"><div class="pstat"><span class="pstat-num">'+(u.posts||0)+'</span><span>动态</span></div><div class="pstat"><span class="pstat-num">'+(u.buddies||0)+'</span><span>搭子</span></div><div class="pstat"><span class="pstat-num">'+myGames.length+'</span><span>游戏</span></div><div class="pstat"><span class="pstat-num">'+(u.likes||0)+'</span><span>获赞</span></div></div>'+
+  const myGames = state.myGames || [];
+  return '<div class="page-header"><h1>👤 我的</h1></div>'+
+    '<div class="profile-header"><div class="profile-avatar-wrap"><div class="profile-avatar">'+u.avatar+'</div><div class="profile-level">Lv.'+(u.level||1)+'</div></div>'+
+    '<div class="profile-info"><h2>'+u.nickname+'</h2><p>'+(u.desc||'VOXMate玩家')+'</p></div></div>'+
+    '<div class="profile-stats"><div class="pstat"><span class="pstat-num">0</span><span>动态</span></div><div class="pstat"><span class="pstat-num">0</span><span>搭子</span></div><div class="pstat"><span class="pstat-num">'+myGames.length+'</span><span>游戏</span></div><div class="pstat"><span class="pstat-num">0</span><span>获赞</span></div></div>'+
     '<div class="section"><h3>🎮 我的游戏</h3><div class="my-games">'+myGames.map(g => '<div class="my-game-item" onclick="showGameDetail('+g.id+')"><div class="my-game-icon" style="background:'+g.color+'"><span>'+g.icon+'</span></div><span>'+g.name+'</span></div>').join('')+'<div class="my-game-item" onclick="addGame()"><div class="my-game-icon" style="background:rgba(124,92,252,0.2)"><span>+</span></div><span>添加</span></div></div></div>'+
-    '<div class="menu-list"><div class="menu-item" onclick="publishPost()"><span>📝</span><span>发布动态</span><span>›</span></div><div class="menu-item" onclick="showMsg(\'❤️ 暂无收藏\')"><span>❤️</span><span>收藏的搭子</span><span class="menu-val">0位</span><span>›</span></div><div class="menu-item" onclick="editProfile()"><span>✏️</span><span>修改资料</span><span>›</span></div><div class="menu-item" onclick="changePwd()"><span>🔑</span><span>修改密码</span><span>›</span></div><div class="menu-item danger" onclick="logout()"><span>🚪</span><span>退出登录</span><span>›</span></div></div>'+
-    '<div class="footer-text">VOXMate · 真人语音开黑平台</div></div>';
+    '<div class="menu-list"><div class="menu-item" onclick="showEditProfile()"><span>✏️</span><span>修改资料</span><span>›</span></div><div class="menu-item danger" onclick="logout()"><span>🚪</span><span>退出登录</span><span>›</span></div></div>'+
+    (state._editProfile ? renderEditProfile() : '')+
+    '<div class="footer-text">VOXMate · 真人语音开黑平台</div>';
 }
 
+// ===== 修改资料 - 漂亮弹窗 =====
+function showEditProfile() {
+  state._editProfile = true;
+  state._editNickname = state.user.nickname || '';
+  state._editAvatar = state.user.avatar || "\u{1F60E}";
+  render();
+  document.getElementById('editNickname')?.focus();
+}
+
+function closeEditProfile() {
+  state._editProfile = false;
+  render();
+}
+
+function renderEditProfile() {
+  const avatars = ["\u{1F60E}","\u{1F929}","\u{1F63A}","\u{1F98A}","\u{1F436}","\u{1F43C}","\u{1F981}","\u{1F42F}","\u{1F430}","\u{1F338}","\u{1F319}",""\u2B50","\u{1F525}","\u{1F49C}",""\u26A1","\u{1F30A}"];
+  return '<div class="modal-overlay" onclick="if(event.target===this)closeEditProfile()">'+
+    '<div class="modal-card"><div class="modal-header"><h2>✏️ 修改资料</h2><button class="modal-close" onclick="closeEditProfile()">✕</button></div>'+
+    '<div class="modal-body"><div class="edit-avatar-section"><label>选择头像</label>'+
+    '<div class="edit-avatar-grid">'+avatars.map(a => '<span class="edit-avatar-option '+(a===state._editAvatar?'selected':'')+'" onclick="state._editAvatar=\''+a+'\';$$(\'.edit-avatar-option\').forEach(el=>el.classList.remove(\'selected\'));this.classList.add(\'selected\')">'+a+'</span>').join('')+'</div></div>'+
+    '<div class="edit-field"><label>昵称</label><input class="edit-input" id="editNickname" value="'+state._editNickname+'" oninput="state._editNickname=this.value" maxlength="10" placeholder="输入昵称..." /></div>'+
+    '<div class="edit-field"><label>个性签名</label><input class="edit-input" id="editDesc" value="'+(state.user.desc||'')+'" oninput="state._editDesc=this.value" maxlength="30" placeholder="一句自我介绍..." /></div></div>'+
+    '<div class="modal-footer"><button class="btn btn-outline" onclick="closeEditProfile()">取消</button><button class="btn btn-primary" onclick="saveEditProfile()">保存</button></div></div></div>';
+}
+
+async function saveEditProfile() {
+  const nickname = state._editNickname?.trim();
+  const avatar = state._editAvatar;
+  const desc = state._editDesc?.trim();
+  if (!nickname || nickname.length < 1) { showMsg('请输入昵称'); return; }
+  state.user.nickname = nickname;
+  state.user.avatar = avatar;
+  state.user.desc = desc || state.user.desc;
+  state._editProfile = false;
+  saveState();
+  render();
+  showMsg('✅ 资料已更新');
+}
+window.saveEditProfile = saveEditProfile;
+
+// ===== LOGIN / REGISTER =====
 function renderLogin() {
   return '<div class="page-header"><h1>👤 我的</h1></div><div class="login-tabs"><button class="login-tab '+(state._loginTab!='register'?'active':'')+'" onclick="state._loginTab=\'login\';render()">登录</button><button class="login-tab '+(state._loginTab==='register'?'active':'')+'" onclick="state._loginTab=\'register\';render()">注册</button></div>'+
     (state._loginTab==='register' ? renderRegister() : renderLoginForm());
 }
 
 function renderLoginForm() {
-  return '<div class="login-card"><div class="login-icon">🎮</div><p class="login-title">欢迎回到 VOXMate</p><input id="loginAcc" class="reg-input" placeholder="账号" maxlength="20" /><input id="loginPwd" class="reg-input" type="password" placeholder="密码" maxlength="30" onkeydown="if(event.key===\'Enter\')doLogin()" /><button class="btn btn-primary btn-block" onclick="doLogin()">登录</button><p class="reg-hint">还没有账号？<a onclick="state._loginTab=\'register\';render()">立即注册</a></p></div>';
+  return '<div class="login-card"><div class="login-icon">🎮</div><p class="login-title">欢迎回到 VOXMate</p><input id="loginAcc" class="reg-input" placeholder="用户名" maxlength="20" /><input id="loginPwd" class="reg-input" type="password" placeholder="密码" maxlength="30" onkeydown="if(event.key===\'Enter\')doLogin()" /><button class="btn btn-primary btn-block" onclick="doLogin()">登录</button><p class="reg-hint">还没有账号？<a onclick="state._loginTab=\'register\';render()">立即注册</a></p></div>';
 }
 
 function renderRegister() {
-  return '<div class="login-card"><div class="login-icon">🚀</div><p class="login-title">创建 VOXMate 账号</p><input id="regAcc" class="reg-input" placeholder="账号（4-20位字母数字）" maxlength="20" /><input id="regPwd" class="reg-input" type="password" placeholder="密码（6-30位）" maxlength="30" /><input id="regName" class="reg-input" placeholder="昵称（2-10字）" maxlength="10" />'+
-    '<div class="avatar-grid">'+['😎','🤩','😺','🦊','🐶','🐼','🐯','🦁','🐰','🌸','🌙','⭐','🔥','💜','⚡','🌊'].map(a => '<span class="avatar-option '+(a==='😎'?'selected':'')+'" onclick="$$(\'.avatar-option\').forEach(el=>el.classList.remove(\'selected\'));this.classList.add(\'selected\');state._regAvatar=\''+a+'\'">'+a+'</span>').join('')+'</div>'+
-    '<div class="reg-games"><span class="tag tag-s">选择常玩游戏</span><div class="reg-game-grid">'+GAMES.slice(0,12).map(g => '<span class="reg-game-option" onclick="this.classList.toggle(\'selected\')" data-game="'+g.name+'"><span>'+g.icon+'</span><span>'+g.name.slice(0,4)+'</span></span>').join('')+'</div></div>'+
+  return '<div class="login-card"><div class="login-icon">🚀</div><p class="login-title">创建 VOXMate 账号</p><input id="regAcc" class="reg-input" placeholder="用户名（3位以上）" maxlength="20" /><input id="regPwd" class="reg-input" type="password" placeholder="密码（6位以上）" maxlength="30" /><input id="regName" class="reg-input" placeholder="昵称" maxlength="10" />'+
+    '<div class="avatar-grid">'+["\u{1F60E}","\u{1F929}","\u{1F63A}","\u{1F98A}","\u{1F436}","\u{1F43C}","\u{1F981}","\u{1F42F}","\u{1F430}","\u{1F338}","\u{1F319}","\u2B50","\u{1F525}","\u{1F49C}","\u26A1","\u{1F30A}"].map(a => '<span class="avatar-option '+(a==="\u{1F60E}"?'selected':'')+'" onclick="$$(\'.avatar-option\').forEach(el=>el.classList.remove(\'selected\'));this.classList.add(\'selected\');state._regAvatar=\''+a+'\'">'+a+'</span>').join('')+'</div>'+
     '<button class="btn btn-primary btn-block" onclick="doRegister()">🚀 注册</button><p class="reg-hint">已有账号？<a onclick="state._loginTab=\'login\';render()">去登录</a></p></div>';
 }
 
-function getAccs() { try { return JSON.parse(localStorage.getItem('vm_accs')||'{}'); } catch(e) { return {}; } }
-function saveAccs(a) { localStorage.setItem('vm_accs', JSON.stringify(a)); }
-
-function doRegister() {
-  const acc = $('#regAcc')?.value.trim();
-  const pwd = $('#regPwd')?.value.trim();
-  const name = $('#regName')?.value.trim();
-  const avatar = state._regAvatar || '😎';
-  if (!acc||acc.length<4) { showMsg('请输入账号（4-20位）'); return; }
-  if (!pwd||pwd.length<6) { showMsg('密码至少6位'); return; }
-  if (!name||name.length<2) { showMsg('请输入昵称（2-10字）'); return; }
-  const accs = getAccs();
-  if (accs[acc]) { showMsg('账号已存在'); return; }
-  const selected = $$('.reg-game-option.selected').map(el => el.dataset.game);
-  const user = { id:Date.now(), account:acc, name, avatar, level:1, game:selected[0]||'', tags:selected.slice(0,3), posts:0, buddies:0, likes:0, favs:0, online:true, vc:true, desc:'新加入VOXMate！' };
-  accs[acc] = { password:pwd, user };
-  saveAccs(accs); state.user = user;
-  state.myGames = GAMES.filter(g => selected.includes(g.name));
+async function doRegister() {
+  const username = $('#regAcc')?.value.trim();
+  const password = $('#regPwd')?.value.trim();
+  const nickname = $('#regName')?.value.trim();
+  const avatar = state._regAvatar || "\u{1F60E}";
+  if (!username||username.length<3) { showMsg('用户名至少3位'); return; }
+  if (!password||password.length<6) { showMsg('密码至少6位'); return; }
+  if (!nickname||nickname.length<1) { showMsg('请输入昵称'); return; }
+  const r = await api('/api/register', { username, password, nickname, avatar });
+  if (!r) return;
+  if (!r.ok) { showMsg(r.msg); return; }
+  state.user = r.user;
+  state.myGames = GAMES.filter(g => (state.user.tags||[]).includes(g.name));
+  connectSocket(r.user);
   showMsg('🎉 注册成功！'); location.hash = 'profile';
 }
 window.doRegister = doRegister;
 
-function doLogin() {
-  const acc = $('#loginAcc')?.value.trim();
-  const pwd = $('#loginPwd')?.value.trim();
-  if (!acc||!pwd) { showMsg('请输入账号和密码'); return; }
-  const accs = getAccs(); const r = accs[acc];
-  if (!r) { showMsg('账号不存在，请注册'); return; }
-  if (r.password !== pwd) { showMsg('密码错误'); return; }
-  state.user = { ...r.user, online:true, vc:true };
+async function doLogin() {
+  const username = $('#loginAcc')?.value.trim();
+  const password = $('#loginPwd')?.value.trim();
+  if (!username||!password) { showMsg('请输入用户名和密码'); return; }
+  const r = await api('/api/login', { username, password });
+  if (!r) return;
+  if (!r.ok) { showMsg(r.msg); return; }
+  state.user = r.user;
   state.myGames = GAMES.filter(g => (state.user.tags||[]).includes(g.name));
+  connectSocket(r.user);
   saveState(); showMsg('👋 欢迎回来'); location.hash = 'profile';
 }
 window.doLogin = doLogin;
-
-function changePwd() {
-  const old = prompt('当前密码：'); if (!old) return;
-  const accs = getAccs(); const r = accs[state.user.account];
-  if (r.password!==old) { showMsg('密码错误'); return; }
-  const n = prompt('新密码（6位以上）：'); if (!n||n.length<6) { showMsg('至少6位'); return; }
-  r.password = n; saveAccs(accs); showMsg('✅ 已修改');
-}
-window.changePwd = changePwd;
-
-function editProfile() {
-  const n = prompt('修改昵称：', state.user.name);
-  if (n&&n.trim()) {
-    state.user.name = n.trim();
-    const accs = getAccs();
-    if (accs[state.user.account]) accs[state.user.account].user.name = n.trim();
-    saveAccs(accs); saveState(); render(); showMsg('✅ 已更新');
-  }
-}
-window.editProfile = editProfile;
 
 function addGame() {
   const g = GAMES[Math.floor(Math.random()*GAMES.length)];
@@ -322,19 +336,13 @@ function addGame() {
 }
 window.addGame = addGame;
 
-function publishPost() {
-  const c = prompt('写点动态吧：');
-  if (!c||!c.trim()) return;
-  savePost({ author:state.user.name, avatar:state.user.avatar, game:state.user.game||'找搭子', content:c.trim(), tags:['语音','开黑','VOXMate'], comments:0, likes:0, time:new Date().toLocaleDateString('zh-CN') });
-  if (state.user) state.user.posts = (state.user.posts||0)+1;
-  saveState(); showMsg('📝 已发布'); render();
-}
-window.publishPost = publishPost;
-
-function logout() {
+async function logout() {
   if (!confirm('确定退出？')) return;
+  if (socket) socket.disconnect();
   state.user = null; state.voiceJoined = null; state.voiceUsers = {};
-  if (typeof leaveVoiceRoom === 'function') leaveVoiceRoom();
+  state._onlineUsers = [];
   saveState(); render(); showMsg('已退出');
 }
 window.logout = logout;
+
+
